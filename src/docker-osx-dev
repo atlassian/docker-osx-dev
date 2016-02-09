@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# A script for running a productive development environment with Docker
+# aaA script for running a productive development environment with Docker
 # on OS X. See https://github.com/brikis98/docker-osx-dev for more info.
 
 set -e
@@ -46,9 +46,9 @@ readonly DEFAULT_COMPOSE_FILE="docker-compose.yml"
 
 # Sync and watch constants
 readonly DEFAULT_PATHS_TO_SYNC="."
-readonly DEFAULT_EXCLUDES=".git"
+readonly DEFAULT_EXCLUDES=""
 readonly DEFAULT_IGNORE_FILE=".dockerignore"
-readonly RSYNC_FLAGS="--archive --log-format 'Syncing %n: %i' --delete --omit-dir-times --inplace --whole-file -l"
+readonly RSYNC_FLAGS="-r --archive --log-format 'Syncing %n: %i' --delete --omit-dir-times --inplace --whole-file -l"
 
 # docker-osx-dev repo constants
 readonly RSYNC_BINARY_URL="https://github.com/brikis98/docker-osx-dev/blob/master/lib/rsync?raw=true"
@@ -327,6 +327,10 @@ function find_vboxsf_mounted_folders {
   $DOCKER_HOST_SSH_COMMAND mount | grep 'type vboxsf' | awk '{print $3}'
 }
 
+function is_folder_mounted {
+    $DOCKER_HOST_SSH_COMMAND mount | grep 'type vboxsf'|grep "$1" | awk '{print $3}'
+}
+
 #
 # Usage: umount_vboxsf_mounted_folder SHARED_FOLDERS
 #
@@ -342,6 +346,25 @@ function umount_vboxsf_mounted_folder {
     $DOCKER_HOST_SSH_COMMAND sudo umount "$vbox_shared_folder"
   done <<< "$vbox_shared_folders"
 }
+
+function mount_vboxsf_shared_folders {
+  all_params=${@}
+  is_directory=$1
+  directories=("${@}")
+  directories=${directories[@]:1}
+  for i in $directories; do 
+    IFS=","; 
+    set $i;
+    IFS=" ";
+    local readonly is_mounted=$(is_folder_mounted "$2")
+    if [[ -z  "$is_mounted" ]] ; then
+        log_info "Mounting host folder $1 to $2 using vboxsf, is mounted $is_mounted"
+        docker-machine ssh default "sudo mkdir -p $2"
+        docker-machine ssh default "sudo mount -t vboxsf -o uid=1000,gid=0 $1 $2"
+    fi
+  done
+}
+
 
 #
 # Checks if the docker host has any VirtualBox shared folders. If so, prompt
@@ -363,8 +386,7 @@ function check_for_shared_folders {
           break
           ;;
         n|N|no|No )
-          log_instructions "Please remove the VirtualBox shares yourself and re-run this script. Exiting."
-          exit 1
+	  break
           ;;
       esac
     done
@@ -751,15 +773,16 @@ function print_next_steps {
 function find_path_to_sync_parent {
   local readonly path="$1"
   local readonly normalized_path=$(greadlink -m $(eval echo '$path'))
-  local readonly paths_to_sync=($PATHS_TO_SYNC)
-
+  IFS=' '
+  read -r -a paths_to_sync <<<"${PATHS_TO_SYNC}"
   local path_to_sync=""
-  for path_to_sync in "${paths_to_sync[@]}"; do
-    if [[ "$normalized_path" == $path_to_sync || "$normalized_path" == $path_to_sync\/* ]]; then
-      echo "$path_to_sync"
+  for path_to_sync in ${paths_to_sync[@]}; do
+    if [[ "$normalized_path" == $path_to_sync || "$normalized_path" =~ "$path_to_sync".* ]]; then
+      echo $path_to_sync
       return
     fi
   done
+
 }
 
 #
@@ -933,6 +956,7 @@ function instructions {
   echo -e "Options:"
   echo -e "  -m, --machine-name name\t\tWhen suplied syncs with the given docker machine host"
   echo -e "  -s, --sync-path PATH\t\t\tSync PATH to the Boot2Docker VM. No wildcards allowed. May be specified multiple times. Default: $DEFAULT_PATHS_TO_SYNC"
+  echo -e "  -sv,--sync-vboxsf VBOX_NAME:PATH\tMount VBOX_NAME to Boot2Docker VM. No wildcards allowed. May be specified multiple times. To add VBOX_NAME to vbox use VBoxManage sharedfolder add MACHINE_NAME --name VBOX_NAME --hostpath PATH_ON_THE_HOST. Use this for read-only folders. Otherwise it will cause performance issues."
   echo -e "  -e, --exclude-path PATH\t\tExclude PATH while syncing. Behaves identically to rsync's --exclude parameter. May be specified multiple times. Default: $DEFAULT_EXCLUDES"
   echo -e "  -c, --compose-file COMPOSE_FILE\tRead in this docker-compose file and sync any volumes specified in it. Default: $DEFAULT_COMPOSE_FILE"
   echo -e "  -i, --ignore-file IGNORE_FILE\t\tRead in this ignore file and exclude any paths within it while syncing (see --exclude). Default: $DEFAULT_IGNORE_FILE"
@@ -1226,6 +1250,8 @@ function handle_command {
   local docker_compose_file="$DEFAULT_COMPOSE_FILE"
   local ignore_file="$DEFAULT_IGNORE_FILE"
   local paths_to_sync=()
+  local paths_to_mount_vboxsf=()
+  local files_to_mount_vboxsf=()
   local excludes=()
   local includes=()
 
@@ -1253,9 +1279,25 @@ function handle_command {
         paths_to_sync+=("$2")
         shift
         ;;
+      -sv|--sync-vboxsf)
+        IFS=: read var1 var2 <<< "$2"
+        paths_to_mount_vboxsf+=("$var1,$var2")
+        shift
+        ;;
+      -sf|--sync-file-vboxsf)
+         IFS=: read var1 var2 <<< "$2"
+         files_to_mount_vboxsf+=("$var1,$var2")
+         shift
+         ;;
       -e|--exclude-path)
         assert_valid_arg "$2" "$key"
         excludes+=("$2")
+        shift
+        ;;
+      -ea|--exclude-paths)
+      UnixShell=("${Unix[@]}" "${Shell[@]}")
+        excludes=("${excludes[@]}" $2)
+        echo excludes ${excludes[@]} ${#excludes[@]}
         shift
         ;;
       -I|--include-path)
@@ -1304,20 +1346,25 @@ function handle_command {
   done
 
   assert_mutually_exclusive "--only-dependencies and --skip-dependencies are mutually exclusive" "$only_dependencies" "$skip_dependencies"
-
   case "$cmd" in
     "$SYNC_COMMAND" | "$SYNC_ONLY_COMMAND" | "$WATCH_ONLY_COMMAND")
       configure_log_level "$log_level"
+      #init_docker_host
+      #mount_vboxsf_shared_folders "${paths_to_mount_vboxsf[@]}"
       configure_paths_to_sync "$docker_compose_file" "${paths_to_sync[@]}"
       configure_excludes "$ignore_file" "${excludes[@]}"
       configure_includes "$ignore_file" "${includes[@]}"
       case "$cmd" in
       "$SYNC_COMMAND")
         sync
+        mount_vboxsf_shared_folders true "${paths_to_mount_vboxsf[@]}"
+        mount_vboxsf_shared_folders false "${files_to_mount_vboxsf[@]}"
         watch
         ;;
       "$SYNC_ONLY_COMMAND")
         sync
+        mount_vboxsf_shared_folders true "${paths_to_mount_vboxsf[@]}"
+        mount_vboxsf_shared_folders false "${files_to_mount_vboxsf[@]}"
         ;;
       "$WATCH_ONLY_COMMAND")
         watch

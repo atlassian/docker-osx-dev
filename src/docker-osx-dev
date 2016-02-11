@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# aaA script for running a productive development environment with Docker
+# A script for running a productive development environment with Docker
 # on OS X. See https://github.com/brikis98/docker-osx-dev for more info.
 
 set -e
@@ -359,8 +359,8 @@ function mount_vboxsf_shared_folders {
     local readonly is_mounted=$(is_folder_mounted "$2")
     if [[ -z  "$is_mounted" ]] ; then
         log_info "Mounting host folder $1 to $2 using vboxsf, is mounted $is_mounted"
-        docker-machine ssh default "sudo mkdir -p $2"
-        docker-machine ssh default "sudo mount -t vboxsf -o uid=1000,gid=0 $1 $2"
+        $DOCKER_HOST_SSH_COMMAND "sudo mkdir -p $2"
+        $DOCKER_HOST_SSH_COMMAND "sudo mount -t vboxsf -o uid=1000,gid=0 $1 $2"
     fi
   done
 }
